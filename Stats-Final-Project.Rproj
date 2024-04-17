@@ -1,13 +1,282 @@
-Version: 1.0
+---
+title: "Stats Final Project"
+author: "alqneis"
+date: "2024-04-17"
+output: html_document
+---
+### Stats Final Project
 
-RestoreWorkspace: Default
-SaveWorkspace: Default
-AlwaysSaveHistory: Default
 
-EnableCodeIndexing: Yes
-UseSpacesForTab: Yes
-NumSpacesForTab: 2
-Encoding: UTF-8
+```{r}
+library(tidyverse)
+library(DataExplorer)
+library(janitor)
+library(skimr)
+library(caret)
+library(GGally)
+library(car)
+library(broom)
+#Analysis One
 
-RnwWeave: Sweave
-LaTeX: pdfLaTeX
+# Load the dataset ensuring character variables are read in properly.
+train_data <- read.csv(file.choose(), header = TRUE, stringsAsFactors = FALSE)
+
+# Quick exploration to check missing data
+plot_missing(train_data)
+
+# Remove columns with a high percentage of missing values
+train_data <- select(train_data, -c(Alley, PoolQC, Fence, MiscFeature))
+
+# Function to calculate the mode for mode imputation
+get_mode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# Simple imputation for missing data
+# For numerical columns, use median imputation
+numeric_cols <- sapply(train_data, is.numeric)
+train_data[numeric_cols] <- lapply(train_data[numeric_cols], function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x))
+
+# For categorical columns, use mode imputation
+categorical_cols <- sapply(train_data, is.character)
+train_data[categorical_cols] <- lapply(train_data[categorical_cols], function(x) ifelse(is.na(x), get_mode(na.omit(x)), x))
+
+# Convert categorical columns to factor type after imputation
+train_data[categorical_cols] <- lapply(train_data[categorical_cols], as.factor)
+
+# Add more features and interactions
+train_data <- train_data %>%
+  mutate(
+    GrLivArea100 = GrLivArea / 100,  # Creating GrLivArea100
+    Age = as.numeric(format(Sys.Date(), "%Y")) - YearBuilt,
+    TotalBathrooms = FullBath + (0.5 * HalfBath)
+  ) %>%
+  filter(Neighborhood %in% c('NAmes', 'Edwards', 'BrkSide'))  # Focus analysis on three neighborhoods
+
+# Fit the initial linear model with interactions
+model <- lm(SalePrice ~ GrLivArea100 * Neighborhood + TotalBathrooms + Age, data = train_data)
+
+# Diagnostic plots
+# Cook's Distance plot
+plot(cooks.distance(model), type = "h", main = "Cook's Distance", ylab = "Cook's Distance", xlab = "Index")
+abline(h = 4/(nrow(train_data)-length(coef(model))-2), col = "red")  # Threshold line
+
+# Residual plots to check for homoscedasticity and normality
+par(mfrow=c(2,2))
+plot(model)
+
+# Influence Plot
+influencePlot(model, id.method="identify", main="Influence Plot", sub="Circle size is proportional to Cook's Distance")
+
+# Refit the model without influential observations if any were removed
+influential <- which(cooks.distance(model) > (4/(nrow(train_data)-length(coef(model))-2)))
+if (length(influential) > 0) {
+  train_data <- train_data[-influential, ]
+  final_model <- lm(SalePrice ~ GrLivArea100 * Neighborhood + TotalBathrooms + Age, data = train_data)
+} else {
+  final_model <- model  # Use the original model if no points were removed
+}
+
+# Model summary including adjusted R²
+model_summary <- summary(final_model)
+print(model_summary$adj.r_squared)
+
+# Set up cross-validation
+set.seed(123)
+train_control <- trainControl(method = "cv", number = 10, savePredictions = "final", returnResamp = "all")
+
+# Fit model using cross-validation
+cv_model <- train(SalePrice ~ GrLivArea100 * Neighborhood + TotalBathrooms + Age, 
+                  data = train_data, 
+                  method = "lm", 
+                  trControl = train_control)
+
+# Extract the out-of-sample predictions and actual values
+cv_predictions <- cv_model$pred
+cv_actuals <- cv_predictions$obs
+
+# Calculate residuals for each fold
+cv_residuals <- cv_predictions$pred - cv_actuals
+
+# Calculate PRESS statistic
+PRESS <- sum(cv_residuals^2)
+
+# Compute the internal CV Press adjusted R-squared
+n <- nrow(train_data)
+p <- length(coef(cv_model$finalModel))
+cv_press_adj_r2 <- 1 - (PRESS / (n - p - 1)) / var(train_data$SalePrice, na.rm = TRUE)
+
+# Print CV Press adjusted R-squared
+print(cv_press_adj_r2)
+
+# Coefficients and confidence intervals
+confint(final_model)
+
+# Visualization of the relationship
+ggplot(train_data, aes(x = GrLivArea100, y = SalePrice, color = Neighborhood)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, fullrange = TRUE) +
+  labs(title = "Relationship Between Living Area and Sale Price by Neighborhood",
+       x = "Living Area (in 100 sq ft increments)",
+       y = "Sale Price ($)")
+
+# Conclusion
+("The enhanced linear model analysis shows that the relationship between living area (per 100 sq. ft.) and sale price varies significantly by neighborhood, with additional factors such as the age of the house and total bathrooms contributing to price variations.")
+```
+
+```{r}
+################################################################################################
+# R Shiny app
+library(shiny)
+library(ggplot2)
+
+# Define UI for application
+ui <- fluidPage(
+  titlePanel("Home Price vs. Square Footage Analysis"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("neighborhood", "Select Neighborhood:",
+                  choices = c("NAmes", "Edwards", "BrkSide"))
+    ),
+    mainPanel(
+      plotOutput("pricePlot")
+    )
+  )
+)
+
+# Define server logic
+server <- function(input, output) {
+  output$pricePlot <- renderPlot({
+    # Filter data based on selected neighborhood
+    filtered_data <- analysis_data[analysis_data$Neighborhood == input$neighborhood, ]
+    
+    # Define specific colors for each neighborhood
+    neighborhood_colors <- c("NAmes" = "blue", "Edwards" = "green", "BrkSide" = "red")
+    
+    # Create the plot
+    ggplot(filtered_data, aes(x = GrLivArea100, y = SalePrice, color = Neighborhood)) +
+      geom_point(alpha = 0.6) +
+      geom_smooth(method = "lm", se = TRUE, fullrange = TRUE) +
+      scale_color_manual(values = neighborhood_colors) + # Set custom colors
+      labs(title = paste("Relationship Between Living Area and Sale Price in", input$neighborhood),
+           x = "Living Area (in 100 sq ft increments)",
+           y = "Sale Price ($)") +
+      theme_minimal()
+  })
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
+```
+
+```{r}
+################################################################################################
+# Load necessary libraries
+library(readr)       # For reading CSV files
+library(dplyr)       # For data manipulation
+library(caret)       # For modeling and machine learning
+library(MASS)        # For stepwise regression
+library(leaps)       # For regression subset selection
+library(glmnet)      # For Ridge regression and other penalized models
+
+train_data <- read.csv(file.choose(), header = TRUE, stringsAsFactors = FALSE)
+
+# Helper function to compute mode for mode imputation
+get_mode <- function(v) {
+  uniqv <- unique(na.omit(v))
+  return(uniqv[which.max(tabulate(match(v, uniqv)))])
+}
+
+# Data Cleaning and Imputation
+numeric_cols <- sapply(train_data, is.numeric)
+train_data[numeric_cols] <- lapply(train_data[numeric_cols], function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x))
+
+categorical_cols <- sapply(train_data, is.character)
+train_data[categorical_cols] <- lapply(train_data[categorical_cols], function(x) ifelse(is.na(x), get_mode(x), x))
+
+train_data[categorical_cols] <- lapply(train_data[categorical_cols], as.factor)
+
+train_data <- na.omit(train_data)
+
+# Data Transformation
+preProcValues <- preProcess(train_data[, sapply(train_data, is.numeric)], method = c("center", "scale"))
+train_data_normalized <- predict(preProcValues, train_data)
+
+# Feature Engineering
+if ("OverallQual" %in% names(train_data_normalized) && "GrLivArea" %in% names(train_data_normalized)) {
+  train_data_normalized$Interaction_Qual_LivArea <- train_data_normalized$OverallQual * train_data_normalized$GrLivArea
+} else {
+  warning("One or more required columns not found in the dataset")
+}
+
+# Split data into training and testing
+set.seed(123)  # for reproducible results
+training_rows <- createDataPartition(train_data_normalized$SalePrice, p = 0.8, list = FALSE)
+training_set <- train_data_normalized[training_rows, ]
+testing_set <- train_data_normalized[-training_rows, ]
+
+# Modeling
+# Linear model using cross-validation
+fitControl <- trainControl(method = "cv", number = 10)
+lm_model <- train(SalePrice ~ ., data = training_set, method = "lm", trControl = fitControl)
+
+# Forward Selection
+forward_model <- regsubsets(SalePrice ~ ., data = training_set, method = "forward", nvmax = 15)
+best_model_forward <- which.max(summary(forward_model)$adjr2)
+forward_final <- coef(forward_model, id = best_model_forward)
+
+# Backward Elimination
+backward_model <- regsubsets(SalePrice ~ ., data = training_set, method = "backward", nvmax = 15)
+best_model_backward <- which.max(summary(backward_model)$adjr2)
+backward_final <- coef(backward_model, id = best_model_backward)
+
+# Stepwise Selection
+stepwise_model <- regsubsets(SalePrice ~ ., data = training_set, method = "seqrep", nvmax = 15)
+best_model_stepwise <- which.max(summary(stepwise_model)$adjr2)
+stepwise_final <- coef(stepwise_model, id = best_model_stepwise)
+
+# Forward Selection
+summary_forward <- summary(forward_model)
+best_adj_r2_forward <- summary_forward$adjr2[best_model_forward]
+best_press_forward <- summary_forward$cp[best_model_forward]
+cat("Forward Selection - Adjusted R^2:", best_adj_r2_forward, "PRESS:", best_press_forward, "\n")
+
+# Backward Elimination
+summary_backward <- summary(backward_model)
+best_adj_r2_backward <- summary_backward$adjr2[best_model_backward]
+best_press_backward <- summary_backward$cp[best_model_backward]
+cat("Backward Elimination - Adjusted R^2:", best_adj_r2_backward, "PRESS:", best_press_backward, "\n")
+
+# Stepwise Selection
+summary_stepwise <- summary(stepwise_model)
+best_adj_r2_stepwise <- summary_stepwise$adjr2[best_model_stepwise]
+best_press_stepwise <- summary_stepwise$cp[best_model_stepwise]
+cat("Stepwise Selection - Adjusted R^2:", best_adj_r2_stepwise, "PRESS:", best_press_stepwise, "\n")
+
+# Ridge Regression
+x <- model.matrix(SalePrice ~ . - 1, data = training_set)
+y <- training_set$SalePrice
+cv_ridge <- cv.glmnet(x, y, alpha = 0, nfolds = 10)
+best_lambda <- cv_ridge$lambda.min
+ridge_model <- glmnet(x, y, alpha = 0, lambda = best_lambda)
+
+# Making predictions and evaluating the Ridge model
+test_x <- model.matrix(SalePrice ~ . - 1, data = testing_set)
+ridge_predictions <- predict(ridge_model, s = best_lambda, newx = test_x)
+ridge_rmse <- sqrt(mean((testing_set$SalePrice - ridge_predictions)^2))
+
+# Plot the cross-validation results to see performance
+plot(cv_ridge)
+# Best lambda value
+best_lambda <- cv_ridge$lambda.min
+
+# Printing RMSE for Ridge Regression
+print(paste("Ridge RMSE:", ridge_rmse))
+
+# Approximating PRESS for the Ridge model using CV MSE
+min_mse <- min(cv_ridge$cvm) # Minimum mean squared error from cross-validation
+n <- nrow(training_set) # Number of observations in your training set
+approx_press_ridge <- min_mse * n # Approximated PRESS
+print(paste("Approximated PRESS for Ridge Regression:", approx_press_ridge))
+```
